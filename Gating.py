@@ -60,7 +60,7 @@ class Gating(object):
         
         
         H3 = tf.matmul(self.w2, H2) + self.b2                    #out*hidden   mul hidden*batch
-        H3 = tf.nn.softmax(H3,dim = 0)                           #out*batch
+        H3 = tf.nn.softmax(H3, axis = 0)                           #out*batch
         return H3
 
 

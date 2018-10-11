@@ -1,12 +1,12 @@
 import numpy as np
 import tensorflow as tf
-import Gating as GT
-from Gating import Gating
-import ExpertWeights as EW
-from ExpertWeights import ExpertWeights
-from AdamWParameter import AdamWParameter
-from AdamW import AdamOptimizer
-import Utils as utils
+from mann import Gating as GT
+from mann.Gating import Gating
+from mann import ExpertWeights as EW
+from mann.ExpertWeights import ExpertWeights
+from mann.AdamWParameter import AdamWParameter
+from mann.AdamW import AdamOptimizer
+from mann import Utils as utils
 
 
 class MANN(object):
