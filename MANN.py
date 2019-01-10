@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow as tf
+import pandas as pd
 from mann import Gating as GT
 from mann.Gating import Gating
 from mann import ExpertWeights as EW
@@ -11,10 +12,10 @@ from mann import Utils as utils
 
 class MANN(object):
     def __init__(self, 
-                 num_joints,
-                 num_styles,
+                 input_size,
+                 output_size,
                  rng,
-                 sess,
+                 sess:tf.Session,
                  datapath, savepath,
                  num_experts,
                  hidden_size = 512,
@@ -23,20 +24,26 @@ class MANN(object):
                  batch_size = 32 , epoch = 150, Te = 10, Tmult =2, 
                  learning_rate_ini = 0.0001, weightDecay_ini = 0.0025, keep_prob_ini = 0.7):
         
-        self.num_joints = num_joints
-        self.num_styles = num_styles
-        self.rng       = rng
-        self.sess      = sess
+        self.input_size  = input_size
+        self.output_size = output_size
+        self.hidden_size = hidden_size
+        self.rng         = rng
+        self.sess        = sess
         
+        shuffle_seed     = rng.randint(0xffff)
         #load data
         self.savepath    = savepath
-        utils.build_path([savepath+'/normalization'])
-        self.input_data  = utils.Normalize(np.float32(np.loadtxt(datapath+'/Input.txt')), axis = 0, savefile=savepath+'/normalization/X')
-        self.output_data = utils.Normalize(np.float32(np.loadtxt(datapath+'/Output.txt')), axis = 0, savefile=savepath+'/normalization/Y')
-        self.input_size  = self.input_data.shape[1]
-        self.output_size = self.output_data.shape[1]
-        self.size_data   = self.input_data.shape[0]
-        self.hidden_size = hidden_size
+        self.datapath    = datapath
+
+        self.input_data  = tf.data.experimental.CsvDataset(datapath + '/Input.csv', header=True, record_defaults=[tf.float32]*input_size).shuffle(buffer_size=10000, seed=shuffle_seed).batch(batch_size, drop_remainder=True)
+        # self.input_data  = tf.data.Dataset.from_tensor_slices(pd.read_csv(datapath + '/Input.csv')).shuffle(buffer_size=10000, seed=shuffle_seed).batch(batch_size, drop_remainder=True)
+        self.input_mean  = np.fromfile(datapath+'/Input.mean.bin')
+        self.input_std   = np.fromfile(datapath+'/Input.std.bin')
+
+        self.output_data = tf.data.experimental.CsvDataset(datapath + '/Output.csv', header=True, record_defaults=[tf.float32]*output_size).shuffle(buffer_size=10000, seed=shuffle_seed).batch(batch_size, drop_remainder=True)
+        # self.output_data = tf.data.Dataset.from_tensor_slices(pd.read_csv(datapath + '/Output.csv')).shuffle(buffer_size=10000, seed=shuffle_seed).batch(batch_size, drop_remainder=True)
+        self.output_mean = np.fromfile(datapath+'/Output.mean.bin')
+        self.output_std  = np.fromfile(datapath+'/Output.std.bin')
         
         #gatingNN
         self.num_experts    = num_experts
@@ -46,8 +53,21 @@ class MANN(object):
         #training hyperpara
         self.batch_size    = batch_size
         self.epoch         = epoch
-        self.total_batch   = int(self.size_data / self.batch_size)
-        
+
+        # calcuclate total_batch
+        total_batch = 0
+        it = self.input_data.make_one_shot_iterator().get_next()
+        self.sess.run(tf.global_variables_initializer())
+        while True:
+            try:
+                self.sess.run([it])
+                total_batch += 1
+            except tf.errors.OutOfRangeError:
+                break
+    
+        self.total_batch = total_batch
+        print('total batches: %d' % total_batch)
+
         #adamWR controllers
         self.AP = AdamWParameter(nEpochs      = self.epoch,
                                  Te           = Te,
@@ -116,18 +136,12 @@ class MANN(object):
         self.loss       = tf.reduce_mean(tf.square(self.nn_Y - self.H3))
         self.optimizer  = AdamOptimizer(learning_rate= self.nn_lr_c, wdc =self.nn_wd_c).minimize(self.loss)
         
-                
-                
-
     def train(self):
         self.sess.run(tf.global_variables_initializer())
         saver = tf.train.Saver()
         
         """training"""
-        print("total_batch:", self.total_batch)
         #randomly select training set
-        I = np.arange(self.size_data)
-        self.rng.shuffle(I)
         error_train = np.ones(self.epoch)
         #saving path
         model_path   = self.savepath+ '/model'
@@ -139,13 +153,20 @@ class MANN(object):
         print('Learning starts..')
         for epoch in range(self.epoch):
             avg_cost_train = 0
+            it_input = tf.transpose(self.input_data.make_one_shot_iterator().get_next())
+            it_output = tf.transpose(self.output_data.make_one_shot_iterator().get_next())
+            # it_input = self.input_data.make_one_shot_iterator().get_next()
+            # it_output = self.output_data.make_one_shot_iterator().get_next()
             for i in range(self.total_batch):
-                index_train = I[i*self.batch_size:(i+1)*self.batch_size]
-                batch_xs = self.input_data[index_train]
-                batch_ys = self.output_data[index_train]
+                batch_xs, batch_ys = self.sess.run([it_input, it_output])
                 clr, wdc = self.AP.getParameter(epoch)   #currentLearningRate & weightDecayCurrent
-                feed_dict = {self.nn_X: batch_xs, self.nn_Y: batch_ys, self.nn_keep_prob: self.keep_prob_ini, self.nn_lr_c: clr, self.nn_wd_c: wdc}
-                l, _, = self.sess.run([self.loss, self.optimizer], feed_dict=feed_dict)
+                l, _, = self.sess.run([self.loss, self.optimizer], feed_dict={
+                    self.nn_X: batch_xs,
+                    self.nn_Y: batch_ys,
+                    self.nn_keep_prob: self.keep_prob_ini,
+                    self.nn_lr_c: clr,
+                    self.nn_wd_c: wdc,
+                })
                 avg_cost_train += l / self.total_batch
                 
                 if i % 1000 == 0:
@@ -184,3 +205,24 @@ class MANN(object):
                            self.num_experts
                            )
         print('Learning Finished')
+
+    def evaluate(self):
+        X = tf.contrib.data.CsvDataset(self.datapath+'/Input.test.csv',  header=True, record_defaults=[tf.float32]*self.num_inputs ).batch(self.batch_size)
+        Y = tf.contrib.data.CsvDataset(self.datapath+'/Output.test.csv', header=True, record_defaults=[tf.float32]*self.num_outputs).batch(self.batch_size)
+
+        it_x = X.make_one_shot_iterator().get_next()
+        it_y = Y.make_one_shot_iterator().get_next()
+        loss = 0.0
+        num_batch = 0
+        while True:
+            try:
+                batch_x, batch_y = self.sess.run([it_x, it_y])
+                feed_dict = {self.nn_X: batch_x, self.nn_Y: batch_y, self.nn_keep_prob: 1.0}
+                [l] = self.sess.run([self.loss], feed_dict=feed_dict)
+                loss += l
+                num_batch += 1
+
+            except tf.errors.OutOfRangeError:
+                break
+
+        print('evaluation loss: %f' % loss/num_batch)
